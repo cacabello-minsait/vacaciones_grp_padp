@@ -1,232 +1,184 @@
-# 🔄 Mismo encabezado
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, date
-from streamlit_calendar import calendar
+import numpy as np
+import os
+from datetime import datetime, timedelta
+from io import BytesIO
+import plotly.express as px
 
-# --------------------- Inicialización de datos ---------------------
-if "miembros" not in st.session_state:
-    st.session_state.miembros = pd.DataFrame(columns=[
-        "Nombre", "Rol", "Vacaciones disponibles", "Horas disponibles"])
+st.set_page_config(page_title="Gestión de Vacaciones", layout="wide")
 
-if "solicitudes" not in st.session_state:
-    st.session_state.solicitudes = pd.DataFrame(columns=[
-        "Nombre", "Fecha", "Tipo", "Estado", "Horas"])
+# -------------------- Configuración inicial --------------------
+RUTA_MIEMBROS = "data_miembros.csv"
+RUTA_SOLICITUDES = "data_solicitudes.csv"
 
-# --------------------- Funciones auxiliares ---------------------
-def obtener_eventos():
-    eventos = []
-    solicitudes = st.session_state.solicitudes.copy()
+ROLES = ["Funcional", "Integración", "Implantación"]
+TIPOS_SOLICITUD = ["Vacaciones", "Libre disposición"]
+ESTADOS = ["Pendiente", "Aprobada", "Rechazada"]
 
-    for _, row in solicitudes.iterrows():
-        estado = row["Estado"]
-        tipo = row["Tipo"]
-        nombre = row["Nombre"]
+# -------------------- Carga y guardado de datos --------------------
+def cargar_datos():
+    if os.path.exists(RUTA_MIEMBROS):
+        miembros = pd.read_csv(RUTA_MIEMBROS)
+    else:
+        miembros = pd.DataFrame(columns=["Nombre", "Rol", "Vacaciones disponibles", "Horas disponibles"])
+        
+    if os.path.exists(RUTA_SOLICITUDES):
+        solicitudes = pd.read_csv(RUTA_SOLICITUDES, parse_dates=["Fecha"])
+    else:
+        solicitudes = pd.DataFrame(columns=["Nombre", "Rol", "Fecha", "Tipo", "Estado", "Comentario"])
+        
+    return miembros, solicitudes
 
-        color = {
-            "Aprobado": "green",
-            "Rechazado": "gray",
-            "Pendiente": "blue",
-            "Solapado": "red"
-        }.get(estado, "blue")
+def guardar_datos(miembros, solicitudes):
+    miembros.to_csv(RUTA_MIEMBROS, index=False)
+    solicitudes.to_csv(RUTA_SOLICITUDES, index=False)
 
-        if tipo in ["FN", "FR"]:
-            title = f"🏖 {tipo}"
-            color = "yellow"
-            text_color = "black"
-        else:
-            tipo_texto = {"V": "Vacaciones", "L": "Libre"}[tipo]
-            title = f"🧍 {nombre} ({tipo_texto} - {estado})"
-            text_color = "white" if color != "yellow" else "black"
+# -------------------- Lógica de solapamientos --------------------
+def detectar_solapamientos(solicitudes):
+    solapados = set()
+    solicitudes_aprob_pend = solicitudes[solicitudes["Estado"].isin(["Aprobada", "Pendiente"])]
+    for (fecha, rol), grupo in solicitudes_aprob_pend.groupby(["Fecha", "Rol"]):
+        if len(grupo) > 1:
+            solapados.update(grupo.index)
+    return solapados
 
-        eventos.append({
-            "title": title,
-            "start": row["Fecha"].strftime("%Y-%m-%d"),
-            "end": row["Fecha"].strftime("%Y-%m-%d"),
-            "color": color,
-            "textColor": text_color
-        })
+# -------------------- Vista: Miembros --------------------
+def mostrar_tab_miembros(miembros):
+    st.subheader("Gestión de miembros del equipo")
 
-    # Añadir fines de semana para este año y el siguiente
-    hoy = date.today()
-    for año in [hoy.year, hoy.year + 1]:
-        inicio = date(año, 1, 1)
-        fin = date(año, 12, 31)
-        dia = inicio
-        while dia <= fin:
-            if dia.weekday() in [5, 6]:  # sábado o domingo
-                eventos.append({
-                    "title": "🟡 FdS",
-                    "start": dia.strftime("%Y-%m-%d"),
-                    "end": dia.strftime("%Y-%m-%d"),
-                    "color": "yellow",
-                    "textColor": "black"
-                })
-            dia += timedelta(days=1)
-
-    return eventos
-
-def detectar_solapamiento(fecha, rol, umbral=1):
-    solicitudes = st.session_state.solicitudes
-    coincidencias = solicitudes[(solicitudes["Fecha"] == fecha) & (solicitudes["Estado"].isin(["Aprobado", "Pendiente"]))]
-    if coincidencias.empty:
-        return False
-    coincidencias_mismo_rol = coincidencias.merge(st.session_state.miembros, on="Nombre")
-    return (coincidencias_mismo_rol[coincidencias_mismo_rol["Rol"] == rol].shape[0] > umbral)
-
-# --------------------- Navegación ---------------------
-pagina = st.sidebar.radio("🧭 Navegación", ["👥 Miembros", "📅 Calendario", "✅ Listado de solicitudes", "📤 Exportar"])
-
-# --------------------- Miembros ---------------------
-if pagina == "👥 Miembros":
-    st.header("👥 Gestión de miembros")
-
-    with st.form("form_miembros"):
-        nombre = st.text_input("Nombre")
-        rol = st.selectbox("Rol", ["Funcional", "Integración", "Implantación", "Jefe de Proyecto"])
-        vacaciones_disp = st.number_input("Vacaciones disponibles", min_value=0, value=0)
-        horas_disp = st.number_input("Horas disponibles", min_value=0, value=0)
-        if st.form_submit_button("Añadir miembro"):
-            if nombre in st.session_state.miembros["Nombre"].values:
-                st.warning("El nombre ya existe. Usa editar si quieres modificarlo.")
-            else:
-                nuevo_miembro = pd.DataFrame([[nombre, rol, vacaciones_disp, horas_disp]], columns=st.session_state.miembros.columns)
-                st.session_state.miembros = pd.concat([st.session_state.miembros, nuevo_miembro], ignore_index=True)
+    with st.expander("➕ Añadir nuevo miembro"):
+        with st.form("form_miembro"):
+            nombre = st.text_input("Nombre")
+            rol = st.selectbox("Rol", ROLES)
+            vacaciones = st.number_input("Vacaciones disponibles", min_value=0, step=1)
+            horas = st.number_input("Horas disponibles", min_value=0, step=1)
+            submitted = st.form_submit_button("Guardar")
+            if submitted and nombre:
+                nuevo = pd.DataFrame([[nombre, rol, vacaciones, horas]], columns=miembros.columns)
+                miembros = pd.concat([miembros, nuevo], ignore_index=True)
+                guardar_datos(miembros, solicitudes)
                 st.success("Miembro añadido correctamente")
 
-    st.subheader("📋 Lista de miembros")
-    for idx, row in st.session_state.miembros.iterrows():
-        with st.expander(f"{row['Nombre']}"):
-            col1, col2, col3 = st.columns([3, 1, 1])
-            col1.write(f"**Rol:** {row['Rol']}")
-            col1.write(f"**Vacaciones disponibles:** {row['Vacaciones disponibles']}")
-            col1.write(f"**Horas disponibles:** {row['Horas disponibles']}")
-            if col2.button("✏️ Editar", key=f"edit_{idx}"):
-                st.session_state.edit_idx = idx
-                st.rerun()
-            if col3.button("🗑 Eliminar", key=f"delete_{idx}"):
-                st.session_state.miembros.drop(index=idx, inplace=True)
-                st.session_state.miembros.reset_index(drop=True, inplace=True)
-                st.success("Miembro eliminado")
-                st.rerun()
+    st.dataframe(miembros)
 
-    if "edit_idx" in st.session_state:
-        idx = st.session_state.edit_idx
-        miembro = st.session_state.miembros.loc[idx]
-        st.subheader("✏️ Editar miembro")
-        with st.form("form_editar"):
-            nuevo_nombre = st.text_input("Nombre", value=miembro["Nombre"])
-            nuevo_rol = st.selectbox("Rol", ["Funcional", "Integración", "Implantación", "Jefe de Proyecto"], index=["Funcional", "Integración", "Implantación", "Jefe de Proyecto"].index(miembro["Rol"]))
-            nuevas_vacaciones = st.number_input("Vacaciones disponibles", min_value=0, value=int(miembro["Vacaciones disponibles"]))
-            nuevas_horas = st.number_input("Horas disponibles", min_value=0, value=int(miembro["Horas disponibles"]))
-            if st.form_submit_button("Guardar cambios"):
-                st.session_state.miembros.at[idx, "Nombre"] = nuevo_nombre
-                st.session_state.miembros.at[idx, "Rol"] = nuevo_rol
-                st.session_state.miembros.at[idx, "Vacaciones disponibles"] = nuevas_vacaciones
-                st.session_state.miembros.at[idx, "Horas disponibles"] = nuevas_horas
-                del st.session_state.edit_idx
-                st.success("Miembro actualizado")
-                st.rerun()
+    eliminar = st.multiselect("Selecciona miembros a eliminar", miembros["Nombre"])
+    if eliminar:
+        miembros = miembros[~miembros["Nombre"].isin(eliminar)]
+        guardar_datos(miembros, solicitudes)
+        st.success("Miembros eliminados")
 
-# --------------------- Calendario ---------------------
-if pagina == "📅 Calendario":
-    st.header("📅 Calendario de solicitudes")
-    eventos = obtener_eventos()
-    calendar_options = {
-        "initialView": "dayGridMonth",
-        "locale": "es",
-        "selectable": False,
-    }
-    calendar(events=eventos, options=calendar_options, custom_css="")
+    return miembros
 
-    st.subheader("📝 Solicitudes de días")
-    with st.form("form_solicitudes"):
-        if len(st.session_state.miembros) == 0:
-            st.warning("Añade miembros primero.")
-        else:
-            nombre_s = st.selectbox("Nombre", st.session_state.miembros["Nombre"].unique())
-            fecha_s = st.date_input("Fecha")
-            tipo_s = st.selectbox("Tipo de solicitud", ["Vacaciones", "Libre Disposición"])
-            horas_s = 0
-            if tipo_s == "Libre Disposición":
-                horas_s = st.number_input("Horas a solicitar", min_value=1, max_value=8, value=1)
-            if st.form_submit_button("Enviar solicitud"):
-                miembro = st.session_state.miembros[st.session_state.miembros["Nombre"] == nombre_s].iloc[0]
-                if tipo_s == "Vacaciones" and miembro["Vacaciones disponibles"] < 1:
-                    st.error("No hay suficientes días de vacaciones disponibles.")
-                elif tipo_s == "Libre Disposición" and miembro["Horas disponibles"] < horas_s:
-                    st.error("No hay suficientes horas disponibles.")
-                else:
-                    nueva = pd.DataFrame([{ "Nombre": nombre_s, "Fecha": fecha_s, "Tipo": tipo_s[0], "Estado": "Pendiente", "Horas": horas_s }])
-                    st.session_state.solicitudes = pd.concat([st.session_state.solicitudes, nueva], ignore_index=True)
-                    st.success("Solicitud enviada")
+# -------------------- Vista: Calendario y solicitudes --------------------
+def mostrar_tab_calendario(miembros, solicitudes):
+    st.subheader("Calendario de solicitudes y festivos")
 
-    st.subheader("➕ Añadir festivos")
-    with st.form("form_festivos"):
-        fecha_festivo = st.date_input("Fecha del festivo", value=date.today())
-        tipo_festivo = st.selectbox("Tipo de festivo", ["FN", "FR"])
-        if st.form_submit_button("Añadir festivo"):
-            festivo = {
-                "Nombre": "Festivo",
-                "Fecha": fecha_festivo,
-                "Tipo": tipo_festivo,
-                "Estado": "Aprobado",
-                "Horas": 0
-            }
-            st.session_state.solicitudes = pd.concat([st.session_state.solicitudes, pd.DataFrame([festivo])], ignore_index=True)
-            st.success(f"Festivo {tipo_festivo} añadido")
+    # Calendario visual básico (puedes usar streamlit_calendar si lo tienes instalado)
+    calendario = solicitudes.copy()
+    calendario["Color"] = calendario["Estado"].map({
+        "Aprobada": "green",
+        "Rechazada": "gray",
+        "Pendiente": "blue"
+    })
 
-# --------------------- Listado de solicitudes ---------------------
-if pagina == "✅ Listado de solicitudes":
-    st.header("✅ Listado de solicitudes")
-    pendientes = st.session_state.solicitudes[st.session_state.solicitudes["Estado"] == "Pendiente"]
-    for idx, row in pendientes.iterrows():
-        with st.expander(f"{row['Nombre']} - {row['Fecha']} ({row['Tipo']})"):
-            cols = st.columns([1, 1, 1])
-            miembro = st.session_state.miembros[st.session_state.miembros["Nombre"] == row["Nombre"]].iloc[0]
+    solapamientos = detectar_solapamientos(solicitudes)
+    calendario.loc[calendario.index.isin(solapamientos), "Color"] = "red"
+
+    fig = px.timeline(
+        calendario, x_start="Fecha", x_end="Fecha",
+        y="Nombre", color="Color", title="Calendario de eventos",
+        hover_data=["Tipo", "Estado", "Rol"]
+    )
+    fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("➕ Solicitar nuevo día")
+    with st.form("form_solicitud"):
+        nombre = st.selectbox("Miembro", miembros["Nombre"])
+        fecha = st.date_input("Fecha de la solicitud")
+        tipo = st.selectbox("Tipo", TIPOS_SOLICITUD)
+        comentario = st.text_input("Comentario (opcional)")
+        enviar = st.form_submit_button("Solicitar")
+
+        if enviar:
+            miembro = miembros[miembros["Nombre"] == nombre].iloc[0]
             rol = miembro["Rol"]
-            if cols[0].button("Aprobar", key=f"ap_{idx}"):
-                if row["Tipo"] == "V":
-                    if miembro["Vacaciones disponibles"] >= 1:
-                        st.session_state.miembros.loc[st.session_state.miembros["Nombre"] == row["Nombre"], "Vacaciones disponibles"] -= 1
-                        nuevo_estado = "Aprobado"
-                        if detectar_solapamiento(row["Fecha"], rol):
-                            nuevo_estado = "Solapado"
-                        st.session_state.solicitudes.at[idx, "Estado"] = nuevo_estado
+
+            # Control de disponibilidad
+            if tipo == "Vacaciones" and miembro["Vacaciones disponibles"] <= 0:
+                st.error("No quedan vacaciones disponibles.")
+            elif tipo == "Libre disposición" and miembro["Horas disponibles"] < 4:
+                st.error("No quedan horas suficientes (mínimo 4h por solicitud).")
+            else:
+                nueva = pd.DataFrame([[nombre, rol, fecha, tipo, "Pendiente", comentario]],
+                                     columns=solicitudes.columns)
+                solicitudes = pd.concat([solicitudes, nueva], ignore_index=True)
+                guardar_datos(miembros, solicitudes)
+                st.success("Solicitud enviada")
+
+    return solicitudes
+
+# -------------------- Vista: Listado de solicitudes --------------------
+def mostrar_tab_solicitudes(miembros, solicitudes):
+    st.subheader("Listado de solicitudes")
+
+    for idx, fila in solicitudes.iterrows():
+        with st.expander(f"{fila['Fecha'].date()} - {fila['Nombre']} ({fila['Estado']})"):
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.write(f"**Tipo:** {fila['Tipo']}")
+                st.write(f"**Rol:** {fila['Rol']}")
+                st.write(f"**Comentario:** {fila['Comentario']}")
+
+            with col2:
+                if fila["Estado"] == "Pendiente":
+                    if st.button("✅ Aprobar", key=f"aprobar_{idx}"):
+                        solicitudes.at[idx, "Estado"] = "Aprobada"
+                        miembro_idx = miembros[miembros["Nombre"] == fila["Nombre"]].index[0]
+                        if fila["Tipo"] == "Vacaciones":
+                            miembros.at[miembro_idx, "Vacaciones disponibles"] -= 1
+                        else:
+                            miembros.at[miembro_idx, "Horas disponibles"] -= 4
+                        guardar_datos(miembros, solicitudes)
                         st.success("Solicitud aprobada")
-                    else:
-                        st.error("No hay suficientes días de vacaciones disponibles.")
-                elif row["Tipo"] == "L":
-                    horas = row["Horas"]
-                    if miembro["Horas disponibles"] >= horas:
-                        st.session_state.miembros.loc[st.session_state.miembros["Nombre"] == row["Nombre"], "Horas disponibles"] -= horas
-                        nuevo_estado = "Aprobado"
-                        if detectar_solapamiento(row["Fecha"], rol):
-                            nuevo_estado = "Solapado"
-                        st.session_state.solicitudes.at[idx, "Estado"] = nuevo_estado
-                        st.success("Solicitud aprobada")
-                    else:
-                        st.error("No hay suficientes horas disponibles.")
-            if cols[1].button("Rechazar", key=f"rej_{idx}"):
-                st.session_state.solicitudes.at[idx, "Estado"] = "Rechazado"
-                st.error("Solicitud rechazada")
-            if cols[2].button("🗑 Eliminar", key=f"del_{idx}"):
-                st.session_state.solicitudes.drop(index=idx, inplace=True)
-                st.session_state.solicitudes.reset_index(drop=True, inplace=True)
-                st.warning("Solicitud eliminada")
-                st.rerun()
 
-# --------------------- Exportar ---------------------
-if pagina == "📤 Exportar":
-    st.header("📤 Exportar datos")
-    excel_data = {
-        "Miembros": st.session_state.miembros,
-        "Solicitudes": st.session_state.solicitudes[["Nombre", "Fecha", "Tipo", "Estado"]]
-    }
+                    if st.button("❌ Rechazar", key=f"rechazar_{idx}"):
+                        solicitudes.at[idx, "Estado"] = "Rechazada"
+                        guardar_datos(miembros, solicitudes)
+                        st.warning("Solicitud rechazada")
 
-    with pd.ExcelWriter("export_vacaciones.xlsx", engine="xlsxwriter") as writer:
-        for hoja, df in excel_data.items():
-            df.to_excel(writer, sheet_name=hoja, index=False)
+            with col3:
+                if st.button("🗑️ Eliminar", key=f"eliminar_{idx}"):
+                    solicitudes = solicitudes.drop(idx).reset_index(drop=True)
+                    guardar_datos(miembros, solicitudes)
+                    st.info("Solicitud eliminada")
 
-    with open("export_vacaciones.xlsx", "rb") as f:
-        st.download_button("Descargar Excel", data=f.read(), file_name="vacaciones.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return solicitudes
+
+# -------------------- Exportar a Excel --------------------
+def exportar_excel(miembros, solicitudes):
+    st.subheader("📤 Exportar datos")
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        miembros.to_excel(writer, sheet_name="Miembros", index=False)
+        solicitudes.to_excel(writer, sheet_name="Solicitudes", index=False)
+        resumen = solicitudes.groupby(["Nombre", "Tipo", "Estado"]).size().unstack(fill_value=0)
+        resumen.to_excel(writer, sheet_name="Resumen", index=True)
+    st.download_button("📥 Descargar Excel", data=output.getvalue(), file_name="vacaciones.xlsx")
+
+# -------------------- Interfaz principal --------------------
+st.title("🗓️ Gestión de Vacaciones y Días Libres")
+menu = st.sidebar.radio("Navegación", ["Miembros", "Calendario", "Listado de solicitudes", "Exportar"])
+
+miembros, solicitudes = cargar_datos()
+
+if menu == "Miembros":
+    miembros = mostrar_tab_miembros(miembros)
+elif menu == "Calendario":
+    solicitudes = mostrar_tab_calendario(miembros, solicitudes)
+elif menu == "Listado de solicitudes":
+    solicitudes = mostrar_tab_solicitudes(miembros, solicitudes)
+elif menu == "Exportar":
+    exportar_excel(miembros, solicitudes)
