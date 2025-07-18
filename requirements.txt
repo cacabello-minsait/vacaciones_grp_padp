@@ -4,3 +4,4 @@ openpyxl
 streamlit-calendar
 xlsxwriter 
 plotly
+python-dateutil
